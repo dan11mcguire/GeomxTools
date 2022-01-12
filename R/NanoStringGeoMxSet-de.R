@@ -11,6 +11,8 @@
 #' @param multiCore = TRUE, set to TRUE to use multiCore, FALSE to run in cluster mode
 #' @param pAdjust = "BY" method for p-value adjustment
 #' @param pairwise boolean to calculate least-square means pairwise differences
+#' @param return_model boolean to return the fitted mixed model object.lmerModLmerTest"  
+#' @param ... further arguments to be passed to lmerTest::lmer during model fitting. 
 #'
 #' @return mixed model output list
 #'
@@ -38,7 +40,7 @@
 
 mixedModelDE <- function(object, elt = "exprs", modelFormula = NULL,
                          groupVar = "group", nCores = 1, multiCore = TRUE,
-                         pAdjust = "BY", pairwise = TRUE) {
+                         pAdjust = "BY", pairwise = TRUE, return_model = FALSE, ...) {
   if (is.null(modelFormula)) {
     modelFormula <- design(object)
   }
@@ -62,52 +64,61 @@ mixedModelDE <- function(object, elt = "exprs", modelFormula = NULL,
     }
   }
   if (nCores > 1) {
-    deFunc <- function(i, groupVar, pDat, modelFormula, exprs, pairwise = TRUE) {
+    #modelFormula<-formula(paste("expr", as.character(modelFormula)[2], sep = " ~ "))
+    deFunc <- function(i, groupVar, pDat, modelFormula, exprs, pairwise = TRUE, return_model=TRUE, ...) {
       dat <- data.frame(expr = exprs$exprs[i, ], pDat)
-      lmOut <- suppressWarnings(lmerTest::lmer(modelFormula, dat))
-      if(pairwise == FALSE) {
-        lsm <- lmerTest::ls_means(lmOut, which = groupVar, pairwise = FALSE)
-      } else {
-        lsm <- lmerTest::ls_means(lmOut, which = groupVar, pairwise = TRUE)
-      }
+      lmOut <- suppressWarnings(lmerTest::lmer(modelFormula, dat, ...))
+      opt_message <- paste0(unlist(lmOut@optinfo$conv$lme4$messages), collapse="...")
+      mod <- lmOut
+      lsm <- lmerTest::ls_means(lmOut, which = groupVar, pairwise = pairwise)
       lmOut <- matrix(stats::anova(lmOut)[groupVar, "Pr(>F)"], ncol = 1, dimnames = list(groupVar, "Pr(>F)"))
       lsmOut <- matrix(cbind(lsm[,"Estimate"], lsm[,"Pr(>|t|)"]), ncol = 2, dimnames = list(gsub(groupVar, "", rownames(lsm)), c("Estimate", "Pr(>|t|)")))
-
-      return(list(anova = lmOut, lsmeans = lsmOut))
+      returnlist <- list(anova = lmOut, lsmeans = lsmOut, message = opt_message)
+      if (return_model) {
+        returnlist[["model"]] <- mod
+      }
+      return(returnlist)
     }
     exprs <- new.env()
     exprs$exprs <- assayDataElement(object, elt = elt)
     if (multiCore & Sys.info()['sysname'] != "Windows") {
-      mixedOut <- parallel::mclapply(featureNames(object), deFunc, groupVar, pDat, formula(paste("expr", as.character(modelFormula)[2], sep = " ~ ")), exprs, mc.cores = nCores)
+      mixedOut <- parallel::mclapply(featureNames(object), deFunc, groupVar, pDat, formula(paste("expr", as.character(modelFormula)[2], sep = " ~ "), return_model = return_model), exprs, mc.cores = nCores,...)
     }
     else {
       cl <- parallel::makeCluster(getOption("cl.cores", nCores))
-      mixedOut <- parallel::parLapply(cl, featureNames(object), deFunc, groupVar, pDat, formula(paste("expr", as.character(modelFormula)[2], sep = " ~ ")), exprs, pairwise)
+      mixedOut <- parallel::parLapply(cl, featureNames(object), deFunc, groupVar, pDat, formula(paste("expr", as.character(modelFormula)[2], sep = " ~ ")), exprs, pairwise, return_model = return_model,...)
       suppressWarnings(parallel::stopCluster(cl))
     }
-    mixedOut <- rbind(array(lapply(mixedOut, function(x) x[["anova"]])),
-                      array(lapply(mixedOut, function(x) x[["lsmeans"]])))
-    colnames(mixedOut) <- featureNames(object)
-    rownames(mixedOut) <- c("anova", "lsmeans")
+    mOut <- rbind(array(lapply(mixedOut, function(x) x[["anova"]])),
+                      array(lapply(mixedOut, function(x) x[["lsmeans"]])),
+                      array(lapply(mixedOut, function(x) x[["message"]]))
+                      )
+    colnames(mOut) <- featureNames(object)
+    rownames(mOut) <- c("anova", "lsmeans", "message")
+    if (return_model) {
+      mOut <- rbind(mOut, array(lapply(mixedOut, "[[", "model")))
+      dimnames(mOut)[[1]][length(dimnames(mOut)[[1]])] <- "model"
+    }
   }
   else {
-    deFunc <- function(expr, groupVar, pDat, modelFormula, pairwise = TRUE) {
+    deFunc <- function(expr, groupVar, pDat, modelFormula, pairwise = TRUE, return_model=TRUE, ...) {
       dat <- data.frame(expr = expr, pDat)
-      lmOut <- suppressMessages(lmerTest::lmer(modelFormula, dat))
-      if(pairwise == FALSE) {
-        lsm <- lmerTest::ls_means(lmOut, which = groupVar, pairwise = FALSE)
-      } else {
-        lsm <- lmerTest::ls_means(lmOut, which = groupVar, pairwise = TRUE)
-      }
+      lmOut <- suppressMessages(lmerTest::lmer(modelFormula, dat, ...))
+      mod <- lmOut
+      opt_message <- paste0(unlist(lmOut@optinfo$conv$lme4$messages), collapse= "...")
+      lsm <- lmerTest::ls_means(lmOut, which = groupVar, pairwise = pairwise)
       lmOut <- matrix(stats::anova(lmOut)[groupVar, "Pr(>F)"], ncol = 1, dimnames = list(groupVar, "Pr(>F)"))
       lsmOut <- matrix(cbind(lsm[,"Estimate"], lsm[,"Pr(>|t|)"]), ncol = 2, dimnames = list(gsub(groupVar, "", rownames(lsm)), c("Estimate", "Pr(>|t|)")))
-
-      return(list(anova = lmOut, lsmeans = lsmOut))
+      returnlist <- list(anova = lmOut, lsmeans = lsmOut, message = opt_message)
+      if (return_model) {
+        returnlist[["model"]] <- mod
+      }
+      return(returnlist)
     }
-    mixedOut <- assayDataApply(object, 1, deFunc, groupVar, pDat, formula(paste("expr", as.character(modelFormula)[2], sep = " ~ ")), pairwise,  elt = elt)
+    mOut <- assayDataApply(object, 1, deFunc, groupVar, pDat, formula(paste("expr", as.character(modelFormula)[2], sep = " ~ ")), pairwise,  elt = elt, return_model=return_model,...)
   }
   if (!is.null(pAdjust)) {
-    mixedOut["anova", ] <- p.adjust(mixedOut["anova", ], method = pAdjust)
+    mOut["anova", ] <- p.adjust(mOut["anova", ], method = pAdjust)
   }
-  return(mixedOut)
+  return(mOut)
 }
